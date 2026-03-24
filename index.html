@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Zewir Hockey | ELO System</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        :root { --bg: #0d1117; --side: #161b22; --border: #30363d; --accent: #58a6ff; --orange: #f9826c; --text: #c9d1d9; }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: sans-serif; display: flex; height: 100vh; overflow: hidden; }
+        .sidebar { width: 220px; background: var(--side); border-right: 1px solid var(--border); padding: 20px; display: flex; flex-direction: column; }
+        .profile { background: #21262d; border: 1px solid var(--border); padding: 15px; border-radius: 12px; text-align: center; margin-bottom: 20px; }
+        .elo-label { font-size: 10px; color: var(--accent); font-weight: bold; text-transform: uppercase; }
+        .elo-num { font-size: 32px; font-weight: bold; color: var(--orange); }
+        .btn { background: #238636; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; margin-bottom: 10px; }
+        .btn-bot { background: transparent; border: 1px solid var(--accent); color: var(--accent); display: none; }
+        .main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #game-view { position: relative; border: 4px solid var(--border); border-radius: 20px; background: #000; }
+        canvas { display: block; cursor: none; }
+        .score { font-size: 60px; font-weight: 900; margin-bottom: 10px; letter-spacing: 15px; }
+        .overlay { position: absolute; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.85); z-index:100; display:flex; flex-direction:column; align-items:center; justify-content:center; border-radius: 16px; text-align: center; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div class="sidebar">
+        <div class="profile">
+            <div class="elo-label">Current Rating</div>
+            <div class="elo-num" id="elo-display">1000</div>
+        </div>
+        <button id="search-btn" class="btn" onclick="startSearch()">ПОИСК</button>
+        <button id="bot-btn" class="btn btn-bot" onclick="startBotGame()">ИГРАТЬ С БОТОМ</button>
+        <div id="status" style="font-size: 11px; color: #8b949e; text-align: center; margin-top: 10px;">Побеждай, чтобы расти!</div>
+    </div>
+
+    <div class="main">
+        <div class="score" id="score">0 : 0</div>
+        <div id="game-view">
+            <div id="lobby" class="overlay">
+                <h2 id="win-msg">ZEWIR HOCKEY</h2>
+                <p id="msg-sub">Матч до 5 голов</p>
+                <div id="elo-change" style="margin-bottom: 15px; font-weight: bold;"></div>
+                <button id="re-btn" class="btn hidden" onclick="location.reload()" style="width: 150px;">ЗАНОВО</button>
+            </div>
+            <canvas id="air" width="800" height="500"></canvas>
+        </div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('air'), ctx = canvas.getContext('2d');
+    const ROOM_KEY = "z-elo-v17-";
+    let peer = new Peer(), conn, isHost = true, running = false, isBotMode = false;
+    
+    // ЭЛО Логика
+    let myElo = parseInt(localStorage.getItem('zewir_elo')) || 1000;
+    document.getElementById('elo-display').innerText = myElo;
+
+    const puck = { x: 400, y: 250, vx: 0, vy: 0, r: 15 };
+    const p1 = { x: 80, y: 250, r: 35, s: 0, lastX: 80, lastY: 250, curVX: 0, curVY: 0 }; 
+    const p2 = { x: 720, y: 250, r: 35, s: 0, lastX: 720, lastY: 250, curVX: 0, curVY: 0 };
+
+    function updateElo(win) {
+        let change = win ? 25 : -15;
+        myElo += change;
+        if (myElo < 0) myElo = 0;
+        localStorage.setItem('zewir_elo', myElo);
+        document.getElementById('elo-display').innerText = myElo;
+        
+        let eloMsg = document.getElementById('elo-change');
+        eloMsg.innerText = win ? `+${change} RATING` : `${change} RATING`;
+        eloMsg.style.color = win ? "#238636" : "#f9826c";
+    }
+
+    function startSearch() {
+        document.getElementById('search-btn').innerText = "ПОИСК...";
+        let room = Math.floor(Math.random() * 5);
+        let c = peer.connect(ROOM_KEY + room);
+        let timeout = setTimeout(() => { c.close(); openMyRoom(room); }, 1500);
+        c.on('open', () => { clearTimeout(timeout); conn = c; isHost = false; init(); });
+    }
+
+    function openMyRoom(n) {
+        peer.destroy(); peer = new Peer(ROOM_KEY + n);
+        peer.on('open', () => {
+            document.getElementById('bot-btn').style.display = "block";
+            peer.on('connection', (c) => { conn = c; isHost = true; init(); });
+        });
+    }
+
+    function startBotGame() { isBotMode = true; isHost = true; init(); }
+
+    function init() {
+        document.getElementById('lobby').classList.add('hidden');
+        running = true; if(isHost) resetPuck();
+        if(!isBotMode && conn) {
+            conn.on('data', (d) => {
+                if(isHost) { p2.x = d.px; p2.y = d.py; p2.curVX = d.vx; p2.curVY = d.vy; } 
+                else { puck.x = d.bx; puck.y = d.by; p1.x = d.p1x; p1.y = d.p1y; p1.s = d.s1; p2.s = d.s2; }
+            });
+        }
+        loop();
+    }
+
+    function resetPuck() {
+        puck.x = 400; puck.y = 250;
+        puck.vx = (Math.random() > 0.5 ? 8 : -8);
+        puck.vy = (Math.random() - 0.5) * 10;
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+        if(!running) return;
+        const r = canvas.getBoundingClientRect();
+        if(isHost) { p1.x = Math.min(e.clientX - r.left, 380); p1.y = e.clientY - r.top; }
+        else { p2.x = Math.max(e.clientX - r.left, 420); p2.y = e.clientY - r.top; }
+    });
+
+    function loop() {
+        if(!running) return;
+
+        if(isHost) {
+            p1.curVX = p1.x - p1.lastX; p1.curVY = p1.y - p1.lastY;
+            p1.lastX = p1.x; p1.lastY = p1.y;
+        } else {
+            p2.curVX = p2.x - p2.lastX; p2.curVY = p2.y - p2.lastY;
+            p2.lastX = p2.x; p2.lastY = p2.y;
+        }
+
+        if(isHost) {
+            puck.x += puck.vx; puck.y += puck.vy;
+            if(puck.y < 15 || puck.y > 485) puck.vy *= -1;
+
+            if(isBotMode) {
+                let targetX = (puck.x > 400) ? puck.x + 50 : 720;
+                let targetY = (puck.x > 400) ? puck.y : 250;
+                targetX = Math.max(500, Math.min(750, targetX));
+                p2.x += (targetX - p2.x) * 0.06;
+                p2.y += (targetY - p2.y) * 0.08;
+                p2.curVX = -2;
+            }
+
+            [p1, p2].forEach(p => {
+                let dx = puck.x - p.x, dy = puck.y - p.y;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                if(dist < puck.r + p.r) {
+                    let angle = Math.atan2(dy, dx);
+                    let mSpeed = Math.sqrt(p.curVX**2 + p.curVY**2);
+                    let speed = Math.max(10, 10 + mSpeed * 0.6); 
+                    puck.vx = Math.cos(angle) * Math.min(speed, 22);
+                    puck.vy = Math.sin(angle) * Math.min(speed, 22);
+                    puck.x = p.x + Math.cos(angle) * (puck.r + p.r + 2);
+                }
+            });
+
+            if (Math.sqrt(puck.vx**2 + puck.vy**2) < 8) { puck.vx *= 1.02; puck.vy *= 1.02; }
+
+            if(puck.x < 0) { p2.s++; resetPuck(); check(); }
+            if(puck.x > 800) { p1.s++; resetPuck(); check(); }
+            if(!isBotMode && conn) conn.send({ bx: puck.x, by: puck.y, p1x: p1.x, p1y: p1.y, s1: p1.s, s2: p2.s });
+        } else if(conn) {
+            conn.send({ px: p2.x, py: p2.y, vx: p2.curVX, vy: p2.curVY });
+        }
+        
+        document.getElementById('score').innerText = `${p1.s} : ${p2.s}`;
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    function check() {
+        if(p1.s >= 5 || p2.s >= 5) {
+            running = false;
+            let win = p1.s >= 5;
+            updateElo(win);
+            document.getElementById('lobby').classList.remove('hidden');
+            document.getElementById('win-msg').innerText = win ? "VICTORY!" : "DEFEAT";
+            document.getElementById('re-btn').classList.remove('hidden');
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0,0,800,500);
+        ctx.strokeStyle = "rgba(255,255,255,0.1)"; ctx.strokeRect(400,0,1,500);
+        ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(puck.x, puck.y, puck.r, 0, 7); ctx.fill();
+        ctx.fillStyle = "#f9826c"; ctx.beginPath(); ctx.arc(p1.x, p1.y, p1.r, 0, 7); ctx.fill();
+        ctx.fillStyle = "#58a6ff"; ctx.beginPath(); ctx.arc(p2.x, p2.y, p2.r, 0, 7); ctx.fill();
+    }
+</script>
+</body>
+</html>
